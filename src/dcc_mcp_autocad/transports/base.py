@@ -80,6 +80,16 @@ class Transport(ABC):
     name: str = "abstract"
     capabilities: frozenset = frozenset()
 
+    def host_version(self) -> Optional[str]:
+        """Return the host's ``ACADVER``, or None when it cannot be read.
+
+        Every post-write read-back failure carries this so the report names the
+        build: a read-back that disagrees is the classic signature of host API
+        drift, and without the version the report is unreproducible. Failing to
+        read it must never fail the operation, so the default is None.
+        """
+        return None
+
     @abstractmethod
     def is_available(self) -> bool:
         """Return True when this transport can be used right now."""

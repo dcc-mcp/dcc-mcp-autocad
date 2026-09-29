@@ -48,3 +48,12 @@ Call `get_status` before a workflow that depends on an interactive capability.
 4. `add_entities` — append typed geometry and save.
 
 Entity arguments are JSON data only; callers cannot supply source code.
+
+## Write verification
+
+`create_drawing`, `add_entities`, and `manage_layers` re-open the DWG and read
+the change back from disk before returning. A result carrying `verified: true`
+was read back, not assumed: the in-memory document looks identical whether or
+not the save reached the file. When the read-back disagrees the call raises an
+error naming the check, the expected value, the value actually read, and the
+host `ACADVER` — treat that as a real failure, not a retry candidate.

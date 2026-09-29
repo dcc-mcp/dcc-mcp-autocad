@@ -212,3 +212,229 @@ def test_failure_detail_stays_readable():
     detail = _decode_console_bytes(b"Error: bad argument!").strip().splitlines()[-1]
 
     assert detail == "Error: bad argument!"
+
+
+class _FakeConsole:
+    """Replays canned accoreconsole runs, keyed by the script piped to stdin.
+
+    Every ``_run_with_result`` call opens its own temp result file, so the fake
+    pulls the path out of the script and writes the next canned payload there.
+    It also honours ``_.SAVEAS`` so ``create_drawing`` produces a real file:
+    without that the read-back would have nothing to reopen and the contract
+    would be untestable.
+    """
+
+    def __init__(self, *payloads):
+        self.payloads = list(payloads)
+        self.scripts = []
+
+    def __call__(self, args, **kwargs):
+        import re
+
+        script = (kwargs.get("input") or b"").decode("utf-8")
+        self.scripts.append(script)
+        index = len(self.scripts) - 1
+        payload = self.payloads[index] if index < len(self.payloads) else {}
+
+        target = re.search(r'\(setq dccfp \(open "(.+?)" "w"\)\)', script)
+        if target:
+            Path(target.group(1).replace("\\\\", "\\")).write_text(
+                json.dumps(payload), encoding="utf-8"
+            )
+        saveas = re.search(r"_\.SAVEAS\r\n2018\r\n(.+?)\r\n", script)
+        if saveas:
+            Path(saveas.group(1)).write_bytes(b"AC1032 test dwg")
+        return _FakeCompleted()
+
+
+def test_status_reports_the_real_acadver(transport, monkeypatch):
+    """Regression: the status payload carried a hardcoded 'core_console'."""
+    monkeypatch.setattr(
+        subprocess, "run", _FakeConsole({"version": "25.1s (LMS Tech)", "acadver": "25.1"})
+    )
+
+    status = transport.status()
+
+    assert status["ready"] is True
+    assert status["version"] == "25.1s (LMS Tech)"
+    assert status["version"] != "core_console"
+
+
+def test_host_version_is_cached_from_status(transport, monkeypatch):
+    console = _FakeConsole({"version": "25.1s (LMS Tech)", "acadver": "25.1s (LMS Tech)"})
+    monkeypatch.setattr(subprocess, "run", console)
+
+    transport.status()
+
+    assert transport.host_version() == "25.1s (LMS Tech)"
+    assert len(console.scripts) == 1, "host_version must reuse the status probe"
+
+
+def test_add_entities_reads_back_the_persisted_count(transport, monkeypatch, tmp_path):
+    dwg = tmp_path / "a.dwg"
+    dwg.write_bytes(b"AC1032")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _FakeConsole(
+            {"entities_before": 2, "entities_after": 4, "entities_requested": 2},
+            {"entity_count": 4, "entity_type_csv": "AcDbLine,AcDbLine,", "layer_csv": "0,"},
+        ),
+    )
+
+    result = transport.add_entities(
+        str(dwg),
+        [{"type": "line", "start": [0, 0], "end": [1, 1]}, {"type": "point", "position": [2, 2]}],
+    )
+
+    assert result["verified"] is True
+    assert result["entity_count_after"] == 4
+    assert result["entity_count_before"] == 2
+
+
+def test_add_entities_fails_when_the_read_back_disagrees(transport, monkeypatch, tmp_path):
+    """The core case: console exited 0, but the save did not reach the file."""
+    from dcc_mcp_autocad.write_contract import WriteVerificationError
+
+    dwg = tmp_path / "a.dwg"
+    dwg.write_bytes(b"AC1032")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _FakeConsole(
+            {"entities_before": 2, "entities_after": 4, "entities_requested": 2},
+            {"entity_count": 3, "entity_type_csv": "AcDbLine,", "layer_csv": "0,"},
+        ),
+    )
+
+    with pytest.raises(WriteVerificationError) as excinfo:
+        transport.add_entities(
+            str(dwg),
+            [
+                {"type": "line", "start": [0, 0], "end": [1, 1]},
+                {"type": "point", "position": [2, 2]},
+            ],
+        )
+
+    assert excinfo.value.check == "entity_count_persisted"
+    assert excinfo.value.expected == 4
+    assert excinfo.value.actual == 3
+    assert "expected 4" in str(excinfo.value)
+    assert "read back 3" in str(excinfo.value)
+
+
+def test_add_entities_fails_when_the_session_count_disagrees(transport, monkeypatch, tmp_path):
+    from dcc_mcp_autocad.write_contract import WriteVerificationError
+
+    dwg = tmp_path / "a.dwg"
+    dwg.write_bytes(b"AC1032")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _FakeConsole(
+            {"entities_before": 2, "entities_after": 3, "entities_requested": 2},
+            {"entity_count": 3, "entity_type_csv": "AcDbLine,", "layer_csv": "0,"},
+        ),
+    )
+
+    with pytest.raises(WriteVerificationError) as excinfo:
+        transport.add_entities(
+            str(dwg),
+            [
+                {"type": "line", "start": [0, 0], "end": [1, 1]},
+                {"type": "point", "position": [2, 2]},
+            ],
+        )
+
+    assert excinfo.value.check == "entities_added_in_session"
+
+
+def test_manage_layers_verifies_the_layers_survived(transport, monkeypatch, tmp_path):
+    dwg = tmp_path / "a.dwg"
+    dwg.write_bytes(b"AC1032")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _FakeConsole(
+            {"created": 1},
+            {"entity_count": 0, "entity_type_csv": "", "layer_csv": "0,WALLS,"},
+        ),
+    )
+
+    result = transport.manage_layers(str(dwg), ["WALLS"])
+
+    assert result["verified"] is True
+    assert result["layers"] == ["0", "WALLS"]
+
+
+def test_manage_layers_fails_when_a_layer_is_absent_after_reload(transport, monkeypatch, tmp_path):
+    """Regression: `created` was assembled from the arguments, not the DWG."""
+    from dcc_mcp_autocad.write_contract import WriteVerificationError
+
+    dwg = tmp_path / "a.dwg"
+    dwg.write_bytes(b"AC1032")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _FakeConsole({"created": 1}, {"entity_count": 0, "entity_type_csv": "", "layer_csv": "0,"}),
+    )
+
+    with pytest.raises(WriteVerificationError) as excinfo:
+        transport.manage_layers(str(dwg), ["WALLS"])
+
+    assert excinfo.value.check == "layers_persisted"
+    assert excinfo.value.expected == ["WALLS"]
+
+
+def test_create_drawing_reports_the_read_back_state(transport, monkeypatch, tmp_path):
+    """Regression: entity_count was hardcoded to 0 rather than read."""
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _FakeConsole(
+            {"created": True},
+            {"entity_count": 5, "entity_type_csv": "AcDbCircle,", "layer_csv": "0,"},
+        ),
+    )
+
+    summary = transport.create_drawing(str(tmp_path / "new.dwg"))
+
+    assert summary.entity_count == 5
+    assert summary.layers == ["0"]
+
+
+def test_create_drawing_fails_without_layer_zero(transport, monkeypatch, tmp_path):
+    """A DWG with no layer 0 is not a usable drawing, whatever its size."""
+    from dcc_mcp_autocad.write_contract import WriteVerificationError
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _FakeConsole(
+            {"created": True},
+            {"entity_count": 0, "entity_type_csv": "", "layer_csv": "WALLS,"},
+        ),
+    )
+
+    with pytest.raises(WriteVerificationError) as excinfo:
+        transport.create_drawing(str(tmp_path / "new.dwg"))
+
+    assert excinfo.value.check == "layer_0_present"
+
+
+def test_read_back_reopens_from_disk(transport, monkeypatch, tmp_path):
+    """The read-back must be a second console run, not the session's state."""
+    dwg = tmp_path / "a.dwg"
+    dwg.write_bytes(b"AC1032")
+    console = _FakeConsole(
+        {"entities_before": 0, "entities_after": 1, "entities_requested": 1},
+        {"entity_count": 1, "entity_type_csv": "AcDbPoint,", "layer_csv": "0,"},
+    )
+    monkeypatch.setattr(subprocess, "run", console)
+
+    transport.add_entities(str(dwg), [{"type": "point", "position": [0, 0]}])
+
+    assert len(console.scripts) == 2, "a mutation must be followed by a read-back run"
+    assert "_.QSAVE" in console.scripts[0]
+    assert "_.QSAVE" not in console.scripts[1], "the read-back must not write again"
+    assert "_.OPEN" in console.scripts[1]

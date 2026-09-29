@@ -23,7 +23,9 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+from ..compat import host_verdict
 from ..discovery import discover
+from ..write_contract import WriteVerificationError
 from .base import (
     CORE_CONSOLE_CAPABILITIES,
     Capability,
@@ -35,6 +37,61 @@ from .base import (
 
 #: AutoCAD scripts require CRLF line endings.
 _LINE_ENDING = "\r\n"
+
+# ACADVER is a string system variable. The type guard keeps `strcat` from
+# erroring on a host that ever returns something else, which would collapse the
+# whole probe instead of just this one field.
+_ACADVER_EXPR = '(if (= (type (getvar "ACADVER")) (quote STR)) (getvar "ACADVER") "")'
+
+# Written as literals rather than assembled by a helper: this is the only place
+# in the adapter where Python, JSON, and AutoLISP quoting all meet, and the
+# escaping is easier to read than to generate. Each line emits one JSON field
+# whose value is the LISP expression spliced into `strcat`.
+_STATUS_LINES = (
+    '(write-line "{" dccfp)',
+    '(write-line (strcat "\\"version\\": \\"" ' + _ACADVER_EXPR + ' "\\",") dccfp)',
+    '(write-line (strcat "\\"acadver\\": \\"" ' + _ACADVER_EXPR + ' "\\"") dccfp)',
+    '(write-line "}" dccfp)',
+)
+
+# Walk the layer symbol table. `tblnext` is vanilla AutoLISP, so this needs no
+# Visual LISP / ActiveX surface that a portable install might not load.
+_LAYER_WALK_LINES = (
+    '(setq dcclayers "")',
+    '(setq dccitem (tblnext "LAYER" T))',
+    "(while dccitem",
+    '  (setq dcclayers (strcat dcclayers (cdr (assoc 2 dccitem)) ","))',
+    '  (setq dccitem (tblnext "LAYER"))',
+    ")",
+)
+
+# Emitted after a mutation, against a freshly re-opened DWG, to prove the
+# change survived the save rather than merely the session.
+_READBACK_LINES = (
+    (
+        '(setq dccss (ssget "X"))',
+        "(setq dccn (if dccss (sslength dccss) 0))",
+        '(setq dcctypes "")',
+        "(setq dcci 0)",
+        "(while (< dcci dccn)",
+        "  (setq dcent (entget (ssname dccss dcci)))",
+        '  (setq dcctypes (strcat dcctypes (cdr (assoc 0 dcent)) ","))',
+        "  (setq dcci (1+ dcci))",
+        ")",
+    )
+    + _LAYER_WALK_LINES
+    + (
+        '(write-line "{" dccfp)',
+        '(write-line (strcat "\\"entity_count\\": " (itoa dccn) ",") dccfp)',
+        '(write-line (strcat "\\"entity_type_csv\\": \\"" dcctypes "\\",") dccfp)',
+        '(write-line (strcat "\\"layer_csv\\": \\"" dcclayers "\\"") dccfp)',
+        '(write-line "}" dccfp)',
+    )
+)
+
+# Taken before the drawing commands run: `result_lines` execute after the
+# result file is opened, so a "before" baseline can only be captured here.
+_BASELINE_LINES = ('(setq dccbefore (if (setq dccss0 (ssget "X")) (sslength dccss0) 0))',)
 
 
 #: Last-resort codec for console output that is neither valid UTF-16 nor
@@ -79,6 +136,11 @@ def _point(values: Sequence[float]) -> str:
     return ",".join(repr(float(v)) for v in values)
 
 
+def _contains_layer(layers: Sequence[str], name: str) -> bool:
+    """Case-insensitive layer membership, as AutoCAD treats layer names."""
+    return any(str(existing).strip().lower() == str(name).strip().lower() for existing in layers)
+
+
 class CoreConsoleTransport(Transport):
     """Drives AutoCAD headlessly by scripting the core console over stdin."""
 
@@ -97,6 +159,7 @@ class CoreConsoleTransport(Transport):
         self.executable = resolved
         self.max_timeout_secs = float(max_timeout_secs)
         self.timeout_secs = min(float(timeout_secs), self.max_timeout_secs)
+        self._host_version: Optional[str] = None
 
     # -- plumbing ---------------------------------------------------------
     def is_available(self) -> bool:
@@ -183,6 +246,52 @@ class CoreConsoleTransport(Transport):
         return payload
 
     # -- transport surface -------------------------------------------------
+    def _probe_version(self) -> Dict[str, Any]:
+        """Run the version probe and return its payload."""
+        return self._run_with_result(["FILEDIA", "0"], _STATUS_LINES, timeout_secs=60)
+
+    def host_version(self) -> Optional[str]:
+        """Read ACADVER out of the console, or None when it cannot be read.
+
+        Only ever called to enrich a failure report, so an unreachable host is
+        reported as unknown rather than turning into a second error.
+        """
+        if self._host_version is not None:
+            return self._host_version
+        try:
+            payload = self._probe_version()
+        except (TransportError, OSError):
+            return None
+        value = payload.get("version") or payload.get("acadver")
+        self._host_version = str(value) if value else None
+        return self._host_version
+
+    def _read_back_state(self, path: Path) -> Dict[str, Any]:
+        """Re-open a DWG and report what the file actually contains.
+
+        The mutating scripts below all run inside one console session, so a
+        zero exit code only proves the console quit. This is the read half of
+        the write contract: it is the only check that can tell "AutoCAD saved"
+        apart from "AutoCAD finished".
+        """
+        payload = self._run_with_result(
+            ["FILEDIA", "0", "_.OPEN", str(path)],
+            _READBACK_LINES,
+        )
+        counts: Dict[str, int] = {}
+        for token in str(payload.get("entity_type_csv", "")).split(","):
+            token = token.strip()
+            if token:
+                counts[token] = counts.get(token, 0) + 1
+        layers = [
+            token.strip() for token in str(payload.get("layer_csv", "")).split(",") if token.strip()
+        ]
+        return {
+            "entity_count": int(payload.get("entity_count", 0)),
+            "entity_types": counts,
+            "layers": layers,
+        }
+
     def status(self) -> Dict[str, Any]:
         base: Dict[str, Any] = {
             "transport": self.name,
@@ -193,17 +302,10 @@ class CoreConsoleTransport(Transport):
         if not self.is_available():
             base["reason"] = "accoreconsole_not_found"
             return base
-        payload = self._run_with_result(
-            ["FILEDIA", "0"],
-            [
-                '(write-line "{" dccfp)',
-                '(write-line "\\"version\\": \\"%s\\"," dccfp)' % _lisp_escape(_acadver_expr()),
-                '(write-line "\\"acadver\\": \\"%s\\"" dccfp)' % _lisp_escape(_acadver_expr()),
-                '(write-line "}" dccfp)',
-            ],
-            timeout_secs=60,
-        )
+        payload = self._probe_version()
         payload.pop("engine", None)
+        version = payload.get("version")
+        self._host_version = str(version) if version else None
         base.update(payload)
         base["ready"] = True
         return base
@@ -212,40 +314,13 @@ class CoreConsoleTransport(Transport):
         source = Path(path).expanduser()
         if not source.is_file():
             raise TransportError("Drawing does not exist: %s" % source)
-        payload = self._run_with_result(
-            ["FILEDIA", "0", "_.OPEN", str(source)],
-            [
-                '(setq dccss (ssget "X"))',
-                "(setq dccn (if dccss (sslength dccss) 0))",
-                '(setq dcctypes "")',
-                "(setq dcci 0)",
-                "(while (< dcci dccn)",
-                "  (setq dcent (entget (ssname dccss dcci)))",
-                '  (setq dcctypes (strcat dcctypes (cdr (assoc 0 dcent)) ","))',
-                "  (setq dcci (1+ dcci))",
-                ")",
-                '(write-line "{" dccfp)',
-                '(write-line (strcat "\\"entity_count\\": " (itoa dccn) ",") dccfp)',
-                '(write-line (strcat "\\"entity_type_csv\\": \\"" dcctypes "\\"") dccfp)',
-                '(write-line "}" dccfp)',
-            ],
-        )
-        engine = payload.get("engine", {})
-        if engine.get("returncode", 0) != 0 and "entity_count" not in payload:
-            raise TransportError("AutoCAD core console failed to inspect %s" % source)
-        raw_count = int(payload.get("entity_count", 0))
-        csv = str(payload.get("entity_type_csv", ""))
-        counts: Dict[str, int] = {}
-        for token in csv.split(","):
-            token = token.strip()
-            if token:
-                counts[token] = counts.get(token, 0) + 1
+        state = self._read_back_state(source)
         return DrawingSummary(
             name=source.name,
             path=str(source),
-            entity_count=raw_count,
-            entity_types=counts,
-            layers=[],
+            entity_count=state["entity_count"],
+            entity_types=state["entity_types"],
+            layers=state["layers"],
             layouts=["Model"],
         )
 
@@ -273,12 +348,29 @@ class CoreConsoleTransport(Transport):
                 "AutoCAD core console produced no drawing (returncode=%s)"
                 % engine.get("returncode")
             )
+        state = self._read_back_state(destination)
+        # Every DWG has layer 0. Its absence after a "successful" create means
+        # the file is not a usable drawing, however plausible its size looks.
+        if not _contains_layer(state["layers"], "0"):
+            raise WriteVerificationError(
+                tool="create_drawing",
+                check="layer_0_present",
+                expected=["0"],
+                actual=state["layers"],
+                host_version=self.host_version(),
+                host_matrix=host_verdict(self.host_version()),
+                params={"output_path": str(destination), "template": template},
+                remediation=(
+                    "The console exited 0 and a file exists, but it does not contain layer 0; "
+                    "the template did not resolve or the save was truncated."
+                ),
+            )
         return DrawingSummary(
             name=destination.name,
             path=str(destination),
-            entity_count=0,
-            entity_types={},
-            layers=["0"],
+            entity_count=state["entity_count"],
+            entity_types=state["entity_types"],
+            layers=state["layers"],
             layouts=["Model"],
         )
 
@@ -292,6 +384,7 @@ class CoreConsoleTransport(Transport):
             raise TransportError("entities must not be empty")
 
         preamble: List[str] = ["FILEDIA", "0", "_.OPEN", str(source)]
+        preamble.extend(_BASELINE_LINES)
         if layer:
             preamble.extend(["_.-LAYER", "_M", str(layer), ""])
         added = 0
@@ -329,18 +422,73 @@ class CoreConsoleTransport(Transport):
         preamble.extend(["_.QSAVE"])
         payload = self._run_with_result(
             preamble,
-            [
+            (
                 '(write-line "{" dccfp)',
-                '(write-line (strcat "\\"entities_added\\": " (itoa %d)) dccfp)' % added,
+                '(write-line (strcat "\\"entities_before\\": " (itoa dccbefore) ",") dccfp)',
+                '(setq dccss1 (ssget "X"))',
+                "(setq dccafter (if dccss1 (sslength dccss1) 0))",
+                '(write-line (strcat "\\"entities_after\\": " (itoa dccafter) ",") dccfp)',
+                '(write-line (strcat "\\"entities_requested\\": " (itoa %d)) dccfp)' % added,
                 '(write-line "}" dccfp)',
-            ],
+            ),
         )
+        before = int(payload.get("entities_before", 0))
+        after = int(payload.get("entities_after", 0))
+        state = self._read_back_state(source)
+
+        if after - before != added:
+            raise WriteVerificationError(
+                tool="add_entities",
+                check="entities_added_in_session",
+                expected=added,
+                actual=after - before,
+                host_version=self.host_version(),
+                host_matrix=host_verdict(self.host_version()),
+                params={"path": str(source), "requested": added, "layer": layer},
+                remediation=(
+                    "%d of %d requested entities did not appear in the drawing; check the "
+                    "coordinates are finite and that the layer exists."
+                    % (added - (after - before), added)
+                ),
+            )
+        if state["entity_count"] != after:
+            raise WriteVerificationError(
+                tool="add_entities",
+                check="entity_count_persisted",
+                expected=after,
+                actual=state["entity_count"],
+                host_version=self.host_version(),
+                host_matrix=host_verdict(self.host_version()),
+                params={"path": str(source), "requested": added, "layer": layer},
+                remediation=(
+                    "The entities were added in the session but did not survive QSAVE; check "
+                    "the DWG is not read-only or held open by another session."
+                ),
+            )
+        if layer and not _contains_layer(state["layers"], layer):
+            raise WriteVerificationError(
+                tool="add_entities",
+                check="layer_persisted",
+                expected=[str(layer)],
+                actual=state["layers"],
+                host_version=self.host_version(),
+                host_matrix=host_verdict(self.host_version()),
+                params={"path": str(source), "layer": layer},
+                remediation=(
+                    "The entities were saved but the requested layer is absent; in AutoCAD a "
+                    "layer must exist before an entity can be assigned to it."
+                ),
+            )
+
         payload.pop("engine", None)
         payload.update(
             {
                 "path": str(source),
                 "entities_added": added,
                 "entity_types": [str(e.get("type", "")).lower() for e in entities],
+                "entity_count_before": before,
+                "entity_count_after": state["entity_count"],
+                "verified": True,
             }
         )
         return payload
@@ -349,26 +497,45 @@ class CoreConsoleTransport(Transport):
         source = Path(path).expanduser()
         if not source.is_file():
             raise TransportError("Drawing does not exist: %s" % source)
+        requested = list(add)
         preamble: List[str] = ["FILEDIA", "0", "_.OPEN", str(source)]
-        for name in add:
+        for name in requested:
             preamble.extend(["_.-LAYER", "_M", str(name), ""])
         preamble.extend(["_.QSAVE"])
         payload = self._run_with_result(
             preamble,
-            [
+            (
                 '(write-line "{" dccfp)',
-                '(write-line (strcat "\\"created\\": " (itoa %d)) dccfp)' % len(add),
+                '(write-line (strcat "\\"created\\": " (itoa %d)) dccfp)' % len(requested),
                 '(write-line "}" dccfp)',
-            ],
+            ),
         )
+        state = self._read_back_state(source)
+        missing = [name for name in requested if not _contains_layer(state["layers"], name)]
+        if missing:
+            raise WriteVerificationError(
+                tool="manage_layers",
+                check="layers_persisted",
+                expected=missing,
+                actual=state["layers"],
+                host_version=self.host_version(),
+                host_matrix=host_verdict(self.host_version()),
+                params={"path": str(source), "add": requested},
+                remediation=(
+                    "The console exited 0 but the layer names are absent after reload; the "
+                    "save did not reach the file, or a layer name was rejected as invalid."
+                ),
+            )
         payload.pop("engine", None)
-        payload.update({"path": str(source), "created": list(add)})
+        payload.update(
+            {
+                "path": str(source),
+                "created": requested,
+                "layers": state["layers"],
+                "verified": True,
+            }
+        )
         return payload
 
     def supports(self, capability: Capability) -> bool:
         return capability in self.capabilities
-
-
-def _acadver_expr() -> str:
-    """Static marker for the status payload; ACADVER is read via AutoLISP."""
-    return "core_console"

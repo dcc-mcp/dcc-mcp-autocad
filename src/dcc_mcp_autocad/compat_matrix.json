@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "host": "autocad",
+  "matrix_version": "2026-09-30",
+  "version_source": "ACADVER — COM: AutoCAD.Application.Version; accoreconsole: (getvar \"ACADVER\")",
+  "notes": "Single source of truth for AutoCAD host support, read by dcc_mcp_autocad.compat and shipped inside the wheel. `supported_ranges` entries carry machine evidence; `unverified_ranges` entries are declared so the doctor can name them, and are still rejected by default. A version outside both is rejected explicitly and never silently downgraded. The `id` of each range is the AutoCAD marketing year; `acadver` is the ObjectARX release it maps to.",
+  "executable_names": [
+    "acad.exe",
+    "accoreconsole.exe"
+  ],
+  "acadver_to_year": {
+    "24.0": "2021",
+    "24.1": "2022",
+    "24.2": "2023",
+    "24.3": "2024",
+    "25.0": "2025",
+    "25.1": "2026",
+    "25.2": "2027"
+  },
+  "supported_ranges": [
+    {
+      "id": "2026",
+      "acadver": "25.1",
+      "min_version": "25.1.0",
+      "max_version": "25.1.9999",
+      "status": "supported",
+      "prog_id": "AutoCAD.Application.25.1",
+      "evidence": "Real AutoCAD 2026 (ACADVER '25.1s (LMS Tech)') on Windows, exercised end to end during the PIP-3785 evaluation: out-of-process COM round-trip (GetVariable DWGNAME/ACADVER/INSUNITS, ModelSpace, Layers, Layouts), LISP dispatch via doc.SendCommand read back through GetVariable(\"USERR1\") = 42.0, 200x AddLine in 0.397s (~504 ops/s), SaveAs -> reopen -> 210 entities; headless accoreconsole.exe driven over stdin produced a valid AC1032 DWG that COM reopened as {'AcDbCircle': 1}."
+    }
+  ],
+  "unverified_ranges": [
+    {
+      "id": "2021",
+      "acadver": "24.0",
+      "min_version": "24.0.0",
+      "max_version": "24.0.9999",
+      "status": "unverified",
+      "prog_id": "AutoCAD.Application.24.0",
+      "in_prog_id_chain": false,
+      "reason": "No machine has run this adapter against ACADVER 24.0. The vanilla COM surface it uses is long-stable, but 'long-stable' is an argument, not evidence."
+    },
+    {
+      "id": "2022",
+      "acadver": "24.1",
+      "min_version": "24.1.0",
+      "max_version": "24.1.9999",
+      "status": "unverified",
+      "prog_id": "AutoCAD.Application.24.1",
+      "in_prog_id_chain": false,
+      "reason": "No machine has run this adapter against ACADVER 24.1."
+    },
+    {
+      "id": "2023",
+      "acadver": "24.2",
+      "min_version": "24.2.0",
+      "max_version": "24.2.9999",
+      "status": "unverified",
+      "prog_id": "AutoCAD.Application.24.2",
+      "in_prog_id_chain": false,
+      "reason": "No machine has run this adapter against ACADVER 24.2."
+    },
+    {
+      "id": "2024",
+      "acadver": "24.3",
+      "min_version": "24.3.0",
+      "max_version": "24.3.9999",
+      "status": "unverified",
+      "prog_id": "AutoCAD.Application.24.3",
+      "in_prog_id_chain": true,
+      "reason": "The ProgID fallback chain can bind AutoCAD.Application.24.3, which proves the seat registers the version — not that the adapter's contract passes on it."
+    },
+    {
+      "id": "2025",
+      "acadver": "25.0",
+      "min_version": "25.0.0",
+      "max_version": "25.0.9999",
+      "status": "unverified",
+      "prog_id": "AutoCAD.Application.25",
+      "in_prog_id_chain": true,
+      "reason": "The ProgID fallback chain can bind AutoCAD.Application.25, but no contract run has been recorded against ACADVER 25.0."
+    },
+    {
+      "id": "2027",
+      "acadver": "25.2",
+      "min_version": "25.2.0",
+      "max_version": "25.2.9999",
+      "status": "unverified",
+      "prog_id": "AutoCAD.Application.25.2",
+      "in_prog_id_chain": false,
+      "projected": true,
+      "reason": "Projected from Autodesk's annual cadence (25.1 = 2026). The mapping is an expectation, not an observation: no ACADVER 25.2 build has been inspected."
+    }
+  ],
+  "breaking_changes": [
+    {
+      "id": "accoreconsole-slash-s-does-not-run-scripts",
+      "title": "accoreconsole.exe /s <script> does not consume the script",
+      "changed_in": "2026",
+      "applies_from": "25.1",
+      "observed_on": ["25.1"],
+      "kind": "behaviour",
+      "symptom": "accoreconsole.exe is launched with /s and never exits; no script runs and no DWG is produced. Absolute paths, relative paths, /i and /l en-US were all tried and all hung.",
+      "adapter_usage": "guarded",
+      "enforcement": "contract",
+      "remediation": "The accoreconsole transport always pipes a CRLF-terminated script through stdin and never passes /s. Regression-tested by tests/test_core_console.py::test_uses_stdin_not_slash_s."
+    },
+    {
+      "id": "com-gen-py-cache-incomplete",
+      "title": "makepy gen_py cache is incomplete (IAcadLine missing Color)",
+      "changed_in": "2026",
+      "applies_from": "25.1",
+      "observed_on": ["25.1"],
+      "kind": "tooling",
+      "symptom": "Early binding through gencache.EnsureDispatch produces a stale gen_py cache that omits members such as IAcadLine.Color, so attribute access fails or silently resolves to nothing.",
+      "adapter_usage": "guarded",
+      "enforcement": "contract",
+      "remediation": "The COM transport uses win32com.client.dynamic.Dispatch exclusively; the makepy cache is never consulted."
+    },
+    {
+      "id": "com-sta-serialisation",
+      "title": "COM calls are STA and rejected while AutoCAD is busy",
+      "changed_in": "2026",
+      "applies_from": "25.1",
+      "observed_on": ["25.1"],
+      "kind": "behaviour",
+      "symptom": "Calls during startup, a modal dialog, or a regeneration return RPC_E_CALL_REJECTED / RPC_E_SERVERCALL_RETRYLATER.",
+      "adapter_usage": "guarded",
+      "enforcement": "postcondition",
+      "remediation": "com_retry re-issues only those two HRESULTs, bounded at 30 attempts x 0.5s; any other HRESULT propagates on the first call. Mutating calls additionally read back after the save, so a call that was dropped rather than retried surfaces as a read-back mismatch instead of a false success."
+    }
+  ]
+}

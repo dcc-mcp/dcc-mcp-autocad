@@ -15,8 +15,12 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Dict, List, Optional, Sequence
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Dict, Iterator, List, Optional, Sequence
 
+from ..compat import host_verdict
+from ..write_contract import WriteVerificationError
 from .base import (
     COM_CAPABILITIES,
     Capability,
@@ -114,6 +118,7 @@ class ComTransport(Transport):
         self._app = None
         self._initialised = False
         self._resolved_prog_id: Optional[str] = None
+        self._host_version: Optional[str] = None
 
     # -- plumbing ---------------------------------------------------------
     def _ensure_com(self) -> None:
@@ -225,6 +230,54 @@ class ComTransport(Transport):
             layouts=layouts,
         )
 
+    def host_version(self) -> Optional[str]:
+        """Return ``AutoCAD.Application.Version`` (an ACADVER string)."""
+        if self._host_version is not None:
+            return self._host_version
+        try:
+            version = getattr(self.application, "Version", None)
+        except Exception:  # noqa: BLE001 - version must never break an operation
+            return None
+        self._host_version = str(version) if version else None
+        return self._host_version
+
+    @contextmanager
+    def _open_document(self, path: str, settle: bool = True) -> Iterator[Any]:
+        """Open a drawing and always close it.
+
+        ``settle`` only matters after a save: a freshly closed DWG stays locked
+        for a moment, so the *next* call is the one that sees the flush. Read
+        paths skip it rather than pay 0.4s to serialise a no-op.
+        """
+        document = None
+        try:
+            document = com_retry(lambda: self._documents().Open(str(path)))
+        except Exception as exc:  # noqa: BLE001 - COM raises non-standard types
+            raise TransportError("AutoCAD could not open %s" % path) from exc
+        try:
+            yield document
+        finally:
+            if document is not None:
+                try:
+                    document.Close(False)
+                finally:
+                    if settle:
+                        _settle()
+
+    def _reopen_summary(self, path: str) -> DrawingSummary:
+        """Re-open a saved DWG and describe what is actually on disk."""
+        with self._open_document(path) as document:
+            return self._summarize(document)
+
+    def _read_back_layers(self, path: str) -> List[str]:
+        """Re-open a saved DWG and list the layer names it actually contains."""
+        with self._open_document(path) as document:
+            return [document.Layers.Item(i).Name for i in range(document.Layers.Count)]
+
+    @staticmethod
+    def _contains_layer(layers: Sequence[str], name: str) -> bool:
+        return any(str(existing).lower() == str(name).lower() for existing in layers)
+
     # -- transport surface -------------------------------------------------
     def status(self) -> Dict[str, Any]:
         app = self.application
@@ -237,7 +290,7 @@ class ComTransport(Transport):
             "transport": self.name,
             "ready": True,
             "prog_id": self._resolved_prog_id,
-            "version": getattr(app, "Version", None),
+            "version": self.host_version(),
             "capabilities": sorted(c.value for c in self.capabilities),
         }
         if document is not None:
@@ -249,41 +302,67 @@ class ComTransport(Transport):
         return info
 
     def inspect_drawing(self, path: str, max_entities: int = 1000) -> DrawingSummary:
-        try:
-            document = com_retry(lambda: self._documents().Open(str(path)))
-        except Exception as exc:  # noqa: BLE001
-            raise TransportError("AutoCAD could not open %s" % path) from exc
-        try:
+        with self._open_document(path, settle=False) as document:
             return self._summarize(document)
-        finally:
-            document.Close(False)
 
     def create_drawing(self, output_path: str, template: Optional[str] = None) -> DrawingSummary:
+        destination = Path(output_path).expanduser()
         try:
             if template:
                 document = com_retry(lambda: self._documents().Add(str(template)))
             else:
                 document = com_retry(self._documents().Add)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - COM raises non-standard types
             raise TransportError("AutoCAD could not create a drawing") from exc
         try:
-            document.SaveAs(str(output_path))
-            return self._summarize(document)
+            document.SaveAs(str(destination))
+            written = self._summarize(document)
         finally:
-            document.Close(False)
+            if document is not None:
+                document.Close(False)
+                _settle()
+
+        if not destination.is_file():
+            raise WriteVerificationError(
+                tool="create_drawing",
+                check="drawing_saved",
+                expected={"path": str(destination), "exists": True},
+                actual={"path": str(destination), "exists": False},
+                host_version=self.host_version(),
+                host_matrix=host_verdict(self.host_version()),
+                params={"output_path": str(destination), "template": template},
+                remediation=(
+                    "AutoCAD raised no error but wrote no file; check the output directory "
+                    "is writable and that a modal dialog is not blocking SaveAs."
+                ),
+            )
+        # Read back from disk, not from the document we still had open: the
+        # in-memory copy is identical whether or not the save reached the file.
+        read_back = self._reopen_summary(destination)
+        if read_back.entity_count != written.entity_count:
+            raise WriteVerificationError(
+                tool="create_drawing",
+                check="entity_count",
+                expected=written.entity_count,
+                actual=read_back.entity_count,
+                host_version=self.host_version(),
+                host_matrix=host_verdict(self.host_version()),
+                params={"output_path": str(destination), "template": template},
+                remediation=(
+                    "The drawing is on disk but does not match the template that was loaded; "
+                    "the save was truncated."
+                ),
+            )
+        return read_back
 
     def add_entities(
         self, path: str, entities: Sequence[Dict[str, Any]], layer: Optional[str] = None
     ) -> Dict[str, Any]:
         _, client = _com_module()
         pythoncom, _ = _com_module()
-        document = None
-        try:
-            document = com_retry(lambda: self._documents().Open(str(path)))
-        except Exception as exc:  # noqa: BLE001
-            raise TransportError("AutoCAD could not open %s" % path) from exc
+        source = Path(path).expanduser()
 
-        try:
+        with self._open_document(str(source)) as document:
             if layer:
                 self._ensure_layer(document, layer)
             modelspace = document.ModelSpace
@@ -317,39 +396,83 @@ class ComTransport(Transport):
                 if layer:
                     modelspace.Item(modelspace.Count - 1).Layer = layer
             document.Save()
-            return {
-                "path": str(path),
-                "entities_added": handled,
-                "entity_types": created,
-                "entity_count_before": before,
-                "entity_count_after": modelspace.Count,
-            }
-        finally:
-            if document is not None:
-                document.Close(False)
-                _settle()
+            expected_after = modelspace.Count
+
+        with self._open_document(str(source)) as document:
+            modelspace = document.ModelSpace
+            actual_after = modelspace.Count
+            assigned: List[str] = []
+            if layer:
+                # The appended entities are the tail of model space; read their
+                # layers back so "created on the wrong layer" cannot pass.
+                start = max(0, modelspace.Count - handled)
+                assigned = [str(modelspace.Item(i).Layer) for i in range(start, modelspace.Count)]
+
+        if actual_after != expected_after:
+            raise WriteVerificationError(
+                tool="add_entities",
+                check="entity_count_persisted",
+                expected=expected_after,
+                actual=actual_after,
+                host_version=self.host_version(),
+                host_matrix=host_verdict(self.host_version()),
+                params={"path": str(source), "requested": len(entities), "layer": layer},
+                remediation=(
+                    "The entities were added in the session but %d of them did not survive "
+                    "the save; check the DWG is not read-only or locked by another session."
+                    % (expected_after - actual_after)
+                ),
+            )
+        if layer:
+            wrong = [name for name in assigned if name.lower() != str(layer).lower()]
+            if wrong:
+                raise WriteVerificationError(
+                    tool="add_entities",
+                    check="entity_layer_persisted",
+                    expected=[str(layer)] * len(assigned),
+                    actual=assigned,
+                    host_version=self.host_version(),
+                    host_matrix=host_verdict(self.host_version()),
+                    params={"path": str(source), "layer": layer},
+                    remediation=(
+                        "The entities were saved but not on the requested layer; in AutoCAD a "
+                        "layer must exist before an entity can be assigned to it."
+                    ),
+                )
+        return {
+            "path": str(source),
+            "entities_added": handled,
+            "entity_types": created,
+            "entity_count_before": before,
+            "entity_count_after": actual_after,
+            "verified": True,
+        }
 
     def manage_layers(self, path: str, add: Sequence[str] = ()) -> Dict[str, Any]:
-        document = None
-        try:
-            document = com_retry(lambda: self._documents().Open(str(path)))
-        except Exception as exc:  # noqa: BLE001
-            raise TransportError("AutoCAD could not open %s" % path) from exc
-        try:
-            created = []
-            for name in add:
-                if self._ensure_layer(document, name):
-                    created.append(name)
+        source = Path(path).expanduser()
+        requested = list(add)
+
+        with self._open_document(str(source)) as document:
+            created = [name for name in requested if self._ensure_layer(document, name)]
             document.Save()
-            return {
-                "path": str(path),
-                "created": created,
-                "layers": [document.Layers.Item(i).Name for i in range(document.Layers.Count)],
-            }
-        finally:
-            if document is not None:
-                document.Close(False)
-                _settle()
+
+        layers = self._read_back_layers(source)
+        missing = [name for name in requested if not self._contains_layer(layers, name)]
+        if missing:
+            raise WriteVerificationError(
+                tool="manage_layers",
+                check="layers_persisted",
+                expected=missing,
+                actual=layers,
+                host_version=self.host_version(),
+                host_matrix=host_verdict(self.host_version()),
+                params={"path": str(source), "add": requested},
+                remediation=(
+                    "Layer creation returned success but the names are absent after reload; "
+                    "the save did not reach the file."
+                ),
+            )
+        return {"path": str(source), "created": created, "layers": layers, "verified": True}
 
     @staticmethod
     def _ensure_layer(document, name: str) -> bool:
