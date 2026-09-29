@@ -1,0 +1,47 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # CI never launches AutoCAD: no runner has it installed or licensed.
+        # Coverage is import safety, transport contracts, and capability logic.
+        python-version: ["3.9", "3.12"]
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "${{ matrix.python-version }}"}
+      - run: python -m pip install -e ".[dev]"
+      - name: Doctor reports not-ready without a host
+        run: |
+          dcc-mcp-autocad-doctor doctor --json > doctor.json
+          python -c "import json;r=json.load(open('doctor.json',encoding='utf-8'));assert r['exit_code'] in (0,10);print('doctor contract ok', r['exit_code'])"
+      - run: python -m pytest
+      - run: python -m ruff check src tests
+      - run: python -m ruff format --check src tests
+      - if: matrix.python-version == '3.12' && matrix.os == 'ubuntu-latest'
+        run: |
+          python -m pip install build twine
+          python -m build
+          python -m twine check dist/*
+
+  autocad-live:
+    # Optional true-machine job. Self-hosted only: GitHub-hosted runners have no
+    # AutoCAD and no license, so this must never be a required check.
+    if: false
+    runs-on: [self-hosted, Windows, AutoCAD]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: python -m pip install -e ".[dev,windows]"
+      - name: Verify the interactive COM transport
+        run: dcc-mcp-autocad-doctor verify --json --transport com
+      - name: Verify the headless accoreconsole transport
+        run: dcc-mcp-autocad-doctor verify --json --transport accoreconsole

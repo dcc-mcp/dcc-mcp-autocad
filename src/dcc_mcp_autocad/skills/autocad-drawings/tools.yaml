@@ -1,0 +1,116 @@
+tools:
+  - name: get_status
+    description: Report AutoCAD host discovery, the negotiated transport, and the active capability set including any degraded capabilities.
+    source_file: scripts/get_status.py
+    input_schema:
+      type: object
+      properties:
+        transport: {type: string, enum: [com, accoreconsole], description: "Force a transport instead of negotiating."}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 60
+    annotations: {read_only_hint: true, destructive_hint: false, idempotent_hint: true, open_world_hint: false, deferred_hint: false}
+
+  - name: inspect_drawing
+    description: Read a DWG and return bounded entity, layer, and layout metadata.
+    source_file: scripts/inspect_drawing.py
+    input_schema:
+      type: object
+      required: [path]
+      properties:
+        path: {type: string, minLength: 1, description: "DWG path readable by the adapter."}
+        max_entities: {type: integer, minimum: 0, maximum: 100000, default: 1000}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 300
+    annotations: {read_only_hint: true, destructive_hint: false, idempotent_hint: true, open_world_hint: false, deferred_hint: true}
+    next-tools:
+      on-failure: [get_status]
+
+  - name: create_drawing
+    description: Create a new DWG from a template and return its summary.
+    source_file: scripts/create_drawing.py
+    input_schema:
+      type: object
+      required: [output_path]
+      properties:
+        output_path: {type: string, minLength: 1, description: "Destination DWG path."}
+        template: {type: string, description: "Optional DWT template name or path."}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 300
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    next-tools:
+      on-failure: [get_status]
+
+  - name: manage_layers
+    description: Ensure layers exist on a DWG and return the resulting layer list.
+    source_file: scripts/manage_layers.py
+    input_schema:
+      type: object
+      required: [path]
+      properties:
+        path: {type: string, minLength: 1}
+        add:
+          type: array
+          items: {type: string, minLength: 1, maxLength: 255}
+          maxItems: 64
+          default: []
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 300
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: true, open_world_hint: false, deferred_hint: true}
+    next-tools:
+      on-failure: [get_status, inspect_drawing]
+
+  - name: add_entities
+    description: Append typed line, circle, point, or text entities to a DWG and save it.
+    source_file: scripts/add_entities.py
+    input_schema:
+      type: object
+      required: [path, entities]
+      properties:
+        path: {type: string, minLength: 1}
+        layer: {type: string, minLength: 1, maxLength: 255}
+        entities:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            type: object
+            required: [type]
+            properties:
+              type: {type: string, enum: [line, circle, point, text]}
+              start: {type: array, items: {type: number}, minItems: 2, maxItems: 3}
+              end: {type: array, items: {type: number}, minItems: 2, maxItems: 3}
+              center: {type: array, items: {type: number}, minItems: 2, maxItems: 3}
+              position: {type: array, items: {type: number}, minItems: 2, maxItems: 3}
+              radius: {type: number, exclusiveMinimum: 0}
+              height: {type: number, exclusiveMinimum: 0}
+              text: {type: string, maxLength: 1024}
+            additionalProperties: false
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 600
+    annotations: {read_only_hint: false, destructive_hint: true, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    next-tools:
+      on-failure: [get_status, inspect_drawing]
