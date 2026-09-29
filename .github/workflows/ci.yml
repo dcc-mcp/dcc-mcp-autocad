@@ -13,6 +13,11 @@ jobs:
         python-version: ["3.9", "3.12"]
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    # Windows runners default to PowerShell, where `set -e` and `$?` do not
+    # behave like POSIX. Pin every step to bash for identical semantics.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -20,13 +25,15 @@ jobs:
       - run: python -m pip install -e ".[dev]"
       - name: Doctor reports not-ready without a host
         run: |
-          # No runner has AutoCAD, so exit code 10 (not ready) is expected here.
+          # No runner has AutoCAD, so exit code 10 (not ready) is expected.
           # Capture it instead of letting `set -e` abort the step.
           set +e
           dcc-mcp-autocad-doctor doctor --json > doctor.json
-          echo "doctor_exit=$?"
+          doctor_exit=$?
           set -e
-          python -c "import json;r=json.load(open('doctor.json',encoding='utf-8'));assert r['exit_code'] == 10;assert r['directly_usable'] is False;print('doctor contract ok', r['exit_code'])"
+          echo "doctor_exit=${doctor_exit}"
+          test "${doctor_exit}" -eq 10
+          python -c "import json;r=json.load(open('doctor.json',encoding='utf-8'));assert r['exit_code'] == 10;assert r['directly_usable'] is False;assert r['degraded'], 'degradation must be declared';print('doctor contract ok', r['exit_code'])"
       - run: python -m pytest
       - run: python -m ruff check src tests
       - run: python -m ruff format --check src tests
@@ -41,6 +48,9 @@ jobs:
     # AutoCAD and no license, so this must never be a required check.
     if: false
     runs-on: [self-hosted, Windows, AutoCAD]
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
