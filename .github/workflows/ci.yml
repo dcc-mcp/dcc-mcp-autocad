@@ -20,8 +20,13 @@ jobs:
       - run: python -m pip install -e ".[dev]"
       - name: Doctor reports not-ready without a host
         run: |
+          # No runner has AutoCAD, so exit code 10 (not ready) is expected here.
+          # Capture it instead of letting `set -e` abort the step.
+          set +e
           dcc-mcp-autocad-doctor doctor --json > doctor.json
-          python -c "import json;r=json.load(open('doctor.json',encoding='utf-8'));assert r['exit_code'] in (0,10);print('doctor contract ok', r['exit_code'])"
+          echo "doctor_exit=$?"
+          set -e
+          python -c "import json;r=json.load(open('doctor.json',encoding='utf-8'));assert r['exit_code'] == 10;assert r['directly_usable'] is False;print('doctor contract ok', r['exit_code'])"
       - run: python -m pytest
       - run: python -m ruff check src tests
       - run: python -m ruff format --check src tests
