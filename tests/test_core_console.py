@@ -171,3 +171,44 @@ def test_decode_falls_back_without_raising():
     assert _decode_console_bytes(b"plain") == "plain"
     # Undecodable bytes must degrade, never raise.
     assert isinstance(_decode_console_bytes(b"\xff\xfe\x00bad"), str)
+
+
+# Every case here previously depended on byte-length parity: UTF-16 accepts any
+# even-length buffer, so even-length ASCII decoded to mojibake instead of
+# raising. The pairs cover both parities in both encodings, plus non-ASCII.
+_DECODE_MATRIX = (
+    (b"plain", "plain"),  # odd length ASCII
+    (b"plains", "plains"),  # even length ASCII
+    (b"Error: bad argument!", "Error: bad argument!"),  # even, punctuation
+    (b"Error: bad argument", "Error: bad argument"),  # odd, punctuation
+    ("plain".encode("utf-16"), "plain"),
+    ("plains".encode("utf-16"), "plains"),
+    ("AutoCAD Core Engine Console".encode("utf-16"), "AutoCAD Core Engine Console"),
+    ("AutoCAD Core Engine Console".encode("utf-8"), "AutoCAD Core Engine Console"),
+    ("图层".encode("utf-8"), "图层"),  # even length UTF-8, no NUL bytes
+    ("图层".encode("utf-16"), "图层"),
+)
+
+
+@pytest.mark.parametrize("raw,expected", _DECODE_MATRIX)
+def test_decode_matrix_is_parity_independent(raw, expected):
+    """Diagnostics must be readable whether the buffer length is odd or even."""
+    from dcc_mcp_autocad.transports.core_console import _decode_console_bytes
+
+    assert _decode_console_bytes(raw) == expected
+
+
+def test_even_length_ascii_is_not_mojibake():
+    """Regression: b"plains" decoded to '汰楡獮' when UTF-16 was tried first."""
+    from dcc_mcp_autocad.transports.core_console import _decode_console_bytes
+
+    assert _decode_console_bytes(b"plains") == "plains"
+
+
+def test_failure_detail_stays_readable():
+    """The no-result error carries the last console line, so decoding matters."""
+    from dcc_mcp_autocad.transports.core_console import _decode_console_bytes
+
+    detail = _decode_console_bytes(b"Error: bad argument!").strip().splitlines()[-1]
+
+    assert detail == "Error: bad argument!"

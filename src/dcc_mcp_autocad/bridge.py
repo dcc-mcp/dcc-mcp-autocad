@@ -28,6 +28,10 @@ from .transports import (
 #: Preference order. COM first because it is the only fully capable transport.
 _TRANSPORT_ORDER = ("com", "accoreconsole")
 
+#: Every transport name the bridge can be pinned to. Exported so callers can
+#: validate rather than discovering a typo 30 COM retries later.
+TRANSPORT_NAMES = _TRANSPORT_ORDER
+
 
 def _build_transports(
     gui_exe: Optional[str],
@@ -174,8 +178,28 @@ class AutoCadBridge:
 
 
 def get_bridge(
+    transport: Optional[str] = None,
     gui_exe: Optional[str] = None,
     core_console_exe: Optional[str] = None,
-    prefer: Optional[str] = None,
 ) -> AutoCadBridge:
-    return AutoCadBridge(gui_exe=gui_exe, core_console_exe=core_console_exe, prefer=prefer)
+    """Build a bridge, optionally pinned to one transport.
+
+    ``transport`` is validated against :data:`TRANSPORT_NAMES`. Without that
+    check a caller who copied the skill-script spelling
+    ``get_bridge("com")`` against this function had ``"com"`` silently
+    interpreted as an ``acad.exe`` path and the pin quietly ignored, which is
+    the one failure in this module that produces no error at all.
+
+    Pinning is a *selection*, not a hint: when the requested transport is
+    unavailable the bridge raises :class:`TransportUnavailable` instead of
+    degrading to the other one. Callers who want negotiation pass ``None``.
+    """
+    if transport is not None and transport not in TRANSPORT_NAMES:
+        raise TransportUnavailable(
+            "unknown transport %r; expected one of %s" % (transport, ", ".join(TRANSPORT_NAMES))
+        )
+    return AutoCadBridge(
+        gui_exe=gui_exe,
+        core_console_exe=core_console_exe,
+        force_transport=transport,
+    )
