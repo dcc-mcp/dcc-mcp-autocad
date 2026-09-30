@@ -70,10 +70,16 @@ Entity arguments are JSON data only; callers cannot supply source code.
 
 ## Runtime shape
 
-An **external bridge host**: the adapter's Python runs outside AutoCAD and
-drives it over the negotiated transport. AutoCAD ships no embedded Python, so
-the host imposes no Python version constraint — only the shared
-`dcc-mcp-core >= 3.7` floor applies.
+An **external bridge host**: the adapter's Python runs *outside* AutoCAD and
+drives it over the negotiated transport. AutoCAD ships no embedded Python at
+all, so the AutoCAD process imposes no constraint on the interpreter.
+
+That is a statement about the **host**, not about this package. This package's
+own floor is `requires-python = ">=3.9"`, and it is set under the ecosystem's
+standing host-side exception — the same one behind `openusd >=3.9`,
+`photoshop >=3.8`, and `zbrush >=3.10`. It is **not** a signal that the Python
+3.7 floor held by `dcc-mcp-core` and the shared libraries has moved; it has
+not.
 
 ## Compatibility
 

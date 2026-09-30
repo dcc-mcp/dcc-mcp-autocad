@@ -37,15 +37,33 @@ from .base import (
 _LINE_ENDING = "\r\n"
 
 
+#: Last-resort codec for console output that is neither valid UTF-16 nor
+#: UTF-8 — on a localised Windows install the console can emit the ANSI code
+#: page, so that is what an unparsable buffer most plausibly is.
+_FALLBACK_ENCODING = "mbcs" if os.name == "nt" else "latin-1"
+
+
 def _decode_console_bytes(raw: Optional[bytes]) -> str:
     """Decode accoreconsole output, which is UTF-16 on Windows.
 
     A UTF-8 decode of that stream raises UnicodeDecodeError, which would abort
     the whole operation before the result file could be read.
+
+    The order is decided by sniffing, not by trying UTF-16 first: UTF-16
+    accepts any even-length buffer, so an even-length ASCII or UTF-8 message
+    decodes "successfully" into mojibake (``b"plains"`` -> ``'汰楡獮'``).
+    UTF-16-encoded text interleaves NUL bytes that UTF-8 and ASCII never
+    contain, so the presence of a NUL is what selects UTF-16.
+
+    This matters more than it looks: result data travels in a UTF-8 result
+    file, so the only thing this decoder ever handles is stdout/stderr — which
+    is the sole diagnostic channel in the portable no-COM path. Getting it
+    wrong means the failure message is unreadable exactly when it is needed.
     """
     if not raw:
         return ""
-    for encoding in ("utf-16", "utf-8", "mbcs" if os.name == "nt" else "latin-1"):
+    order = ("utf-16", "utf-8") if b"\x00" in raw else ("utf-8", "utf-16")
+    for encoding in order + (_FALLBACK_ENCODING,):
         try:
             return raw.decode(encoding)
         except (UnicodeDecodeError, LookupError):

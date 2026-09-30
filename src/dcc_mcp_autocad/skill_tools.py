@@ -39,10 +39,16 @@ def resolve_under_workspace(path: str) -> str:
 
 
 def get_bridge(transport: Optional[str] = None):
-    """Build the negotiated bridge lazily."""
-    from .bridge import AutoCadBridge
+    """Build the negotiated bridge lazily.
 
-    return AutoCadBridge(force_transport=transport)
+    Delegates to :func:`dcc_mcp_autocad.bridge.get_bridge` so the package-level
+    export and the skill-facing helper can never drift apart again: they used
+    to be two different functions with the same name and different first
+    arguments.
+    """
+    from .bridge import get_bridge as _build_bridge
+
+    return _build_bridge(transport)
 
 
 def entity_summary(entities: List[Dict[str, Any]]) -> Dict[str, Any]:

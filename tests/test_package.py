@@ -78,3 +78,26 @@ def test_no_vertical_specific_api_references():
         text = path.read_text(encoding="utf-8")
         for token in banned:
             assert token not in text, "%s references vertical API %s" % (path.name, token)
+
+
+def test_get_bridge_first_argument_is_a_transport():
+    """The package export and the skill helper must agree on the signature.
+
+    They were once two different ``get_bridge`` functions: the package took an
+    ``acad.exe`` path first, the skill helper took a transport name. Calling the
+    package export with ``"com"`` therefore bound the string as an executable
+    path and silently ignored the transport choice.
+    """
+    import pytest
+
+    from dcc_mcp_autocad import get_bridge
+    from dcc_mcp_autocad.skill_tools import get_bridge as skill_get_bridge
+    from dcc_mcp_autocad.transports import TransportUnavailable
+
+    assert get_bridge("accoreconsole")._forced == "accoreconsole"
+    assert skill_get_bridge("accoreconsole")._forced == "accoreconsole"
+    assert get_bridge()._forced is None
+
+    for bad in ("comx", r"C:\Program Files\Autodesk\AutoCAD 2026\acad.exe"):
+        with pytest.raises(TransportUnavailable):
+            get_bridge(bad)
