@@ -18,16 +18,17 @@ from dcc_mcp_autocad.transports import (
 
 
 class FakeTransport(Transport):
-    def __init__(self, name, capabilities, available=True):
+    def __init__(self, name, capabilities, available=True, version="25.1s"):
         self.name = name
         self.capabilities = frozenset(capabilities)
         self.available = available
+        self.version = version
 
     def is_available(self):
         return self.available
 
     def status(self):
-        return {"transport": self.name, "ready": True, "version": "25.1s"}
+        return {"transport": self.name, "ready": True, "version": self.version}
 
     def inspect_drawing(self, path, max_entities=1000):
         return DrawingSummary(name="x.dwg", path=path, entity_count=0)
@@ -143,3 +144,99 @@ def test_exceptions_never_traceback(monkeypatch, capsys):
     assert code == 10
     assert report["failure"]["reason"] == "doctor_exception"
     assert report["directly_usable"] is False
+
+
+def test_verified_host_reports_its_matrix_status(monkeypatch, _no_discovery, capsys):
+    transports = [FakeTransport("com", COM_CAPABILITIES, version="25.1s (LMS Tech)")]
+    code = _install(monkeypatch, transports, ["doctor", "--json"])
+
+    report = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert report["host"]["version"] == "25.1s (LMS Tech)"
+    assert report["host"]["status"] == "supported"
+    assert report["host"]["supported"] is True
+    assert report["host"]["matrix"]["host_year"] == "2026"
+    assert report["error_code"] is None
+
+
+def test_unverified_host_version_exits_eleven(monkeypatch, _no_discovery, capsys):
+    """A declared-but-unverified build is refused, not shrugged at."""
+    transports = [FakeTransport("com", COM_CAPABILITIES, version="25.0s (LMS Tech)")]
+    code = _install(monkeypatch, transports, ["doctor", "--json"])
+
+    report = json.loads(capsys.readouterr().out)
+
+    assert code == 11
+    assert report["exit_code"] == 11
+    assert report["directly_usable"] is False
+    assert report["host"]["status"] == "unverified"
+    assert report["error_code"] == "autocad_host_version_unverified"
+    assert report["failure"]["stage"] == "host_version"
+    assert "DCC_MCP_AUTOCAD_ALLOW_UNVERIFIED_HOST" in report["failure"]["reason"]
+    assert report["next_steps"], "refusals must offer a concrete next step"
+
+
+def test_override_accepts_an_unverified_host_and_says_so(monkeypatch, _no_discovery, capsys):
+    monkeypatch.setenv("DCC_MCP_AUTOCAD_ALLOW_UNVERIFIED_HOST", "1")
+    transports = [FakeTransport("com", COM_CAPABILITIES, version="25.0s (LMS Tech)")]
+    code = _install(monkeypatch, transports, ["doctor", "--json"])
+
+    report = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert report["host"]["override_active"] is True
+    assert report["host"]["allow_unverified_host"] is True
+    # The override is visible; it is not a silent downgrade.
+    assert report["host"]["status"] == "unverified"
+
+
+def test_unparsable_version_is_never_overridden(monkeypatch, _no_discovery, capsys):
+    """An ACADVER nobody can parse has no range to opt into."""
+    monkeypatch.setenv("DCC_MCP_AUTOCAD_ALLOW_UNVERIFIED_HOST", "1")
+    transports = [FakeTransport("com", COM_CAPABILITIES, version="garbage")]
+    code = _install(monkeypatch, transports, ["doctor", "--json"])
+
+    report = json.loads(capsys.readouterr().out)
+
+    assert code == 11
+    assert report["host"]["status"] == "unknown"
+    assert report["host"]["override_active"] is False
+    assert report["error_code"] == "autocad_host_version_unparsable"
+
+
+def test_missing_host_version_is_refused(monkeypatch, _no_discovery, capsys):
+    transports = [FakeTransport("com", COM_CAPABILITIES, version=None)]
+    code = _install(monkeypatch, transports, ["doctor", "--json"])
+
+    report = json.loads(capsys.readouterr().out)
+
+    assert code == 11
+    assert report["host"]["status"] == "unavailable"
+    assert report["error_code"] == "autocad_host_version_unavailable"
+
+
+def test_report_states_the_ci_bound(monkeypatch, _no_discovery, capsys):
+    """A green CI run must never be quotable as host-level evidence."""
+    transports = [FakeTransport("com", COM_CAPABILITIES)]
+    _install(monkeypatch, transports, ["doctor", "--json"])
+
+    report = json.loads(capsys.readouterr().out)
+    verification = report["verification"]
+
+    assert verification["level"] == "contract"
+    assert "github-hosted runner" in verification["bound"].lower()
+    assert "AutoCAD" in verification["bound"]
+    assert "autocad-live" in verification["host_level_evidence"]
+
+
+def test_missing_version_next_step_does_not_offer_the_override(monkeypatch, _no_discovery, capsys):
+    """With no version there is no range to opt into; do not imply there is."""
+    transports = [FakeTransport("com", COM_CAPABILITIES, version=None)]
+    _install(monkeypatch, transports, ["doctor", "--json"])
+
+    report = json.loads(capsys.readouterr().out)
+    why = report["next_steps"][0]["description"]
+
+    assert "DCC_MCP_AUTOCAD_ALLOW_UNVERIFIED_HOST" not in why
+    assert "not an override case" in why
