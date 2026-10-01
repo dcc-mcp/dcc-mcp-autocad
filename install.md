@@ -92,7 +92,7 @@ the configured workspace. The default workspace is the system temp directory,
 so **reading or editing drawings you already have — for example
 `%USERPROFILE%\Documents\plan.dwg` — is rejected until you extend the roots**:
 
-```bash
+```cmd
 set DCC_MCP_AUTOCAD_WORKSPACE=C:\drawing-work
 set DCC_MCP_AUTOCAD_ALLOWED_ROOTS=C:\Users\you\Documents
 ```
