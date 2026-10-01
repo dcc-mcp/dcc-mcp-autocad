@@ -23,7 +23,40 @@ from dcc_mcp_autocad.write_contract import (
 # Transport plumbing, not tools: they observe or describe the transport and
 # change no drawing, so they owe no read-back and are excluded from the
 # classification test deliberately rather than by omission.
-NON_TOOL_METHODS = {"is_available", "supports", "host_version"}
+NON_TOOL_METHODS = {
+    "is_available",
+    "supports",
+    "host_version",
+    # ComTransport only: drops the COM session handle. It writes nothing to a
+    # drawing and runs after the drawing has already been verified, so it owes
+    # no read-back. Named here rather than left for the next reader to find.
+    "close",
+}
+
+
+def _transport_classes():
+    """Every transport class, base and subclasses, with their modules imported.
+
+    ``__subclasses__()`` only sees classes whose module has already been
+    imported, so the transport modules are imported here first; otherwise a
+    method added to a transport whose module the suite never loaded escapes
+    this guard entirely.
+    """
+    from dcc_mcp_autocad.transports import (  # noqa: F401
+        Transport,  # noqa: F401
+        com_transport,
+        core_console,
+    )
+
+    ordered = []
+    stack = [Transport]
+    while stack:
+        cls = stack.pop()
+        if cls in ordered:
+            continue
+        ordered.append(cls)
+        stack.extend(cls.__subclasses__())
+    return ordered
 
 
 def test_numbers_match_tolerance():
@@ -99,21 +132,41 @@ def test_every_transport_method_is_classified():
     """A new transport method must declare whether it owes a read-back.
 
     Without this, adding a mutating method is silent: nothing in the suite
-    would notice that it can report success without proving anything.
+    would notice that it can report success without proving anything. The walk
+    covers subclasses as well as the base: ``vars(Transport)`` alone never sees
+    a method defined on a subclass, which is exactly where a new transport-
+    specific write tool would appear.
     """
-    from dcc_mcp_autocad.transports import Transport
-
-    own = {
-        name
-        for name, value in vars(Transport).items()
-        if not name.startswith("_") and callable(value)
-    }
     classified = set(MUTATING_TOOLS) | set(READ_ONLY_TOOLS)
+    unclassified = {
+        cls.__name__: sorted(own - classified - NON_TOOL_METHODS)
+        for cls in _transport_classes()
+        for own in (
+            {
+                name
+                for name, value in vars(cls).items()
+                if not name.startswith("_") and callable(value)
+            },
+        )
+        if own - classified - NON_TOOL_METHODS
+    }
 
-    assert own - classified - NON_TOOL_METHODS == set(), (
-        "unclassified Transport method: it has no answer to 'does this owe a post-write read-back?'"
+    assert unclassified == {}, (
+        "unclassified transport method: it has no answer to 'does this owe a "
+        "post-write read-back?' -> %r" % (unclassified,)
     )
     assert set(MUTATING_TOOLS) & set(READ_ONLY_TOOLS) == set()
+
+
+def test_the_classifier_guard_sees_subclass_methods():
+    """Non-vacuity: the guard must actually cover more than the base class.
+
+    If the transport modules stop importing, ``__subclasses__()`` comes back
+    empty and the classification test would pass while guarding nothing.
+    """
+    names = {cls.__name__ for cls in _transport_classes()}
+
+    assert {"Transport", "ComTransport", "CoreConsoleTransport"} <= names, names
 
 
 def test_mutation_classification_covers_the_documented_tools():
