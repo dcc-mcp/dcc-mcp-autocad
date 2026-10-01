@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.2](https://github.com/dcc-mcp/dcc-mcp-autocad/compare/v0.1.1...v0.1.2) (2026-10-01)
+
+
+### Bug Fixes
+
+* **ci:** cut release PRs with a collaborator token so CI auto-runs ([#10](https://github.com/dcc-mcp/dcc-mcp-autocad/issues/10)) ([2c0daca](https://github.com/dcc-mcp/dcc-mcp-autocad/commit/2c0daca1ebee8238d5540a47ff878cb8f3a2d76d))
+
+
+### Documentation
+
+* correct the workspace wording, and derive the transport guard scan from the package ([#8](https://github.com/dcc-mcp/dcc-mcp-autocad/issues/8)) ([a40ac16](https://github.com/dcc-mcp/dcc-mcp-autocad/commit/a40ac16cba242bf53f98a7a9a18d9ad2a56f51e5))
+* state the workspace rule as implemented, and relax the transport coverage assertion ([#12](https://github.com/dcc-mcp/dcc-mcp-autocad/issues/12)) ([97f473e](https://github.com/dcc-mcp/dcc-mcp-autocad/commit/97f473e805fcfad1ed50bf1095d1ed451c957eb5))
+
 ## [0.1.1](https://github.com/dcc-mcp/dcc-mcp-autocad/compare/v0.1.0...v0.1.1) (2026-10-01)
 
 
