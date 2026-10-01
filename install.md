@@ -93,10 +93,14 @@ can see the run was accepted rather than verified.
 
 ## Drawing workspace (deny-by-default)
 
-`create_drawing`, `add_entities`, and `manage_layers` only accept paths inside
-the configured workspace. The default workspace is the system temp directory,
-so **reading or editing drawings you already have — for example
-`%USERPROFILE%\Documents\plan.dwg` — is rejected until you extend the roots**:
+All four drawing tools — `create_drawing`, `add_entities`, `manage_layers`, and
+the read-only `inspect_drawing` — accept a path only when it normalizes inside
+an accepted root. Accepted roots are the configured workspace plus any root
+listed in `DCC_MCP_AUTOCAD_ALLOWED_ROOTS`, which may lie outside it. The
+comparison is lexical, so symlinks are not followed. The default workspace is
+the system temp directory, so **reading or editing drawings you already have —
+for example `%USERPROFILE%\Documents\plan.dwg` — is rejected until you extend
+the roots**:
 
 ```cmd
 set DCC_MCP_AUTOCAD_WORKSPACE=C:\drawing-work
