@@ -185,7 +185,10 @@ def test_the_classifier_guard_sees_subclass_methods():
     walked = {cls.__module__.rsplit(".", 1)[-1] for cls in _transport_classes()}
     assert {"base", "com_transport", "core_console"} <= scanned, scanned
     # Every module defining a transport must be represented in the walk.
-    assert scanned & walked == {"base", "com_transport", "core_console"}, (
+    # Subset, not equality: adding a transport grows both sides, and an
+    # invariant that fails for bookkeeping reasons gets "fixed" by relaxing
+    # it. A module dropped from the scan still fails this.
+    assert {"base", "com_transport", "core_console"} <= scanned & walked, (
         scanned,
         walked,
     )

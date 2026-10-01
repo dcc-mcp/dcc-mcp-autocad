@@ -24,7 +24,13 @@ def default_workspace() -> str:
 
 
 def resolve_under_workspace(path: str) -> str:
-    """Resolve a drawing path, keeping it inside the configured workspace."""
+    """Resolve a drawing path, keeping it inside an accepted root.
+
+    Accepted roots are the configured workspace plus any root listed in
+    ``DCC_MCP_AUTOCAD_ALLOWED_ROOTS``, which may lie outside the workspace.
+    The comparison is lexical (``abspath`` + ``normcase``): symlinks are not
+    resolved.
+    """
     candidate = os.path.abspath(os.path.expanduser(path))
     roots = [os.path.normcase(default_workspace())]
     extra = os.environ.get("DCC_MCP_AUTOCAD_ALLOWED_ROOTS", "")
