@@ -12,7 +12,7 @@ metadata:
   dcc-mcp:
     dcc: autocad
     layer: domain
-    version: "0.1.0"  # x-release-please-version
+    version: "0.1.1"  # x-release-please-version
     search-hint: "AutoCAD DWG drawing layer entity line circle batch portable headless accoreconsole"
     tags: [autocad, dwg, cad, drafting, aec, batch, portable]
     tools: tools.yaml
