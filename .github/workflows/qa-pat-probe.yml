@@ -5,7 +5,7 @@ name: QA PAT probe
 # approval gate is applied per run actor, so a token whose owner is not a
 # collaborator would leave the release PR gated.
 on:
-  workflow_dispatch:
+  pull_request:
 
 permissions: {}
 
