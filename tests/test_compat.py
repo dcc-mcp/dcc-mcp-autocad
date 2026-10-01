@@ -96,13 +96,25 @@ def test_unknown_status_does_not_promise_an_override():
 
 
 def test_overridable_statuses_still_offer_the_switch():
-    """Too-new / unlisted / unverified remain overridable and must say so."""
+    """Too-new / unlisted / unverified remain overridable and must say so.
+
+    Assert the executable remedy ("=1 to override"), not merely that the
+    variable is named: since the UNKNOWN sentence was rewritten to name
+    ``ALLOW_UNVERIFIED_ENV`` precisely in order to say it does *not* apply, the
+    variable's presence is no longer a proxy for "an override was offered".
+    Dropping "to override" from any of these sentences must turn this red.
+    """
+    seen = set()
     for acadver in ("25.0s", "26.0s", "24.5s"):
         verdict = classify_host(acadver)
         if verdict["status"] == UNKNOWN:
             continue
+        seen.add(verdict["status"])
         reason = unsupported_reason(verdict)
-        assert "to override" in reason or ALLOW_UNVERIFIED_ENV in reason, acadver
+        assert "=1 to override" in reason, acadver
+    # Non-vacuity: every overridable status must actually be exercised, or a
+    # matrix change could shrink the loop to nothing and look like a pass.
+    assert seen == {TOO_NEW, UNVERIFIED, UNLISTED}, seen
 
 
 def test_host_verdict_of_missing_version_is_none():
