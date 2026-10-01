@@ -85,6 +85,26 @@ def test_unsupported_reason_names_the_override():
         assert ALLOW_UNVERIFIED_ENV in reason, acadver
 
 
+def test_unknown_status_does_not_promise_an_override():
+    """UNKNOWN is not overridable, so the text must not sell the switch."""
+    reason = unsupported_reason({"status": UNKNOWN, "version": "garbage", "supported_ranges": ()})
+
+    # The variable is named to say it does not apply, not as a remedy.
+    assert ALLOW_UNVERIFIED_ENV in reason
+    assert "cannot be overridden" in reason
+    assert not reason.rstrip().endswith("to run anyway at your own risk.")
+
+
+def test_overridable_statuses_still_offer_the_switch():
+    """Too-new / unlisted / unverified remain overridable and must say so."""
+    for acadver in ("25.0s", "26.0s", "24.5s"):
+        verdict = classify_host(acadver)
+        if verdict["status"] == UNKNOWN:
+            continue
+        reason = unsupported_reason(verdict)
+        assert "to override" in reason or ALLOW_UNVERIFIED_ENV in reason, acadver
+
+
 def test_host_verdict_of_missing_version_is_none():
     assert host_verdict(None) is None
     assert host_verdict("") is None

@@ -25,7 +25,7 @@
       "max_version": "25.1.9999",
       "status": "supported",
       "prog_id": "AutoCAD.Application.25.1",
-      "evidence": "Real AutoCAD 2026 (ACADVER '25.1s (LMS Tech)') on Windows, exercised end to end during the PIP-3785 evaluation: out-of-process COM round-trip (GetVariable DWGNAME/ACADVER/INSUNITS, ModelSpace, Layers, Layouts), LISP dispatch via doc.SendCommand read back through GetVariable(\"USERR1\") = 42.0, 200x AddLine in 0.397s (~504 ops/s), SaveAs -> reopen -> 210 entities; headless accoreconsole.exe driven over stdin produced a valid AC1032 DWG that COM reopened as {'AcDbCircle': 1}."
+      "evidence": "Real AutoCAD 2026 (ACADVER '25.1s (LMS Tech)') on Windows, exercised end to end during adapter evaluation: out-of-process COM round-trip (GetVariable DWGNAME/ACADVER/INSUNITS, ModelSpace, Layers, Layouts), LISP dispatch via doc.SendCommand read back through GetVariable(\"USERR1\") = 42.0, 200x AddLine in 0.397s (~504 ops/s), SaveAs -> reopen -> 210 entities; headless accoreconsole.exe driven over stdin produced a valid AC1032 DWG that COM reopened as {'AcDbCircle': 1}."
     }
   ],
   "unverified_ranges": [
