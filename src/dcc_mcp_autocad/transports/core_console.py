@@ -67,15 +67,22 @@ _LAYER_WALK_LINES = (
 
 # Emitted after a mutation, against a freshly re-opened DWG, to prove the
 # change survived the save rather than merely the session.
+#
+# Beside each entity type (group code 0) the walk also records the entity's
+# layer (group code 8). A layer existing in the LAYER table says nothing about
+# whether any given entity was assigned to it, so per-entity layers must be
+# read out of the entities themselves, not from the table.
 _READBACK_LINES = (
     (
         '(setq dccss (ssget "X"))',
         "(setq dccn (if dccss (sslength dccss) 0))",
         '(setq dcctypes "")',
+        '(setq dcclayersof "")',
         "(setq dcci 0)",
         "(while (< dcci dccn)",
         "  (setq dcent (entget (ssname dccss dcci)))",
         '  (setq dcctypes (strcat dcctypes (cdr (assoc 0 dcent)) ","))',
+        '  (setq dcclayersof (strcat dcclayersof (cdr (assoc 8 dcent)) ","))',
         "  (setq dcci (1+ dcci))",
         ")",
     )
@@ -84,6 +91,7 @@ _READBACK_LINES = (
         '(write-line "{" dccfp)',
         '(write-line (strcat "\\"entity_count\\": " (itoa dccn) ",") dccfp)',
         '(write-line (strcat "\\"entity_type_csv\\": \\"" dcctypes "\\",") dccfp)',
+        '(write-line (strcat "\\"entity_layer_csv\\": \\"" dcclayersof "\\",") dccfp)',
         '(write-line (strcat "\\"layer_csv\\": \\"" dcclayers "\\"") dccfp)',
         '(write-line "}" dccfp)',
     )
@@ -160,6 +168,7 @@ class CoreConsoleTransport(Transport):
         self.max_timeout_secs = float(max_timeout_secs)
         self.timeout_secs = min(float(timeout_secs), self.max_timeout_secs)
         self._host_version: Optional[str] = None
+        self._host_version_failed: bool = False
 
     # -- plumbing ---------------------------------------------------------
     def is_available(self) -> bool:
@@ -258,12 +267,22 @@ class CoreConsoleTransport(Transport):
         """
         if self._host_version is not None:
             return self._host_version
+        # A failed probe is cached too. Reaching this path usually means the
+        # host is already unhealthy, and _probe_version() costs up to
+        # _PROBE_TIMEOUT_SECS; re-probing once per failure report (and twice
+        # per WriteVerificationError) would stack minutes onto an error that
+        # should surface immediately.
+        if self._host_version_failed:
+            return None
         try:
             payload = self._probe_version()
         except (TransportError, OSError):
+            self._host_version_failed = True
             return None
         value = payload.get("version") or payload.get("acadver")
         self._host_version = str(value) if value else None
+        if not self._host_version:
+            self._host_version_failed = True
         return self._host_version
 
     def _read_back_state(self, path: Path) -> Dict[str, Any]:
@@ -286,10 +305,18 @@ class CoreConsoleTransport(Transport):
         layers = [
             token.strip() for token in str(payload.get("layer_csv", "")).split(",") if token.strip()
         ]
+        # One entry per entity, in selection order: the layer each entity is
+        # actually on. Distinct from `layers`, which is the LAYER table.
+        entity_layers = [
+            token.strip()
+            for token in str(payload.get("entity_layer_csv", "")).split(",")
+            if token.strip()
+        ]
         return {
             "entity_count": int(payload.get("entity_count", 0)),
             "entity_types": counts,
             "layers": layers,
+            "entity_layers": entity_layers,
         }
 
     def status(self) -> Dict[str, Any]:
@@ -479,6 +506,41 @@ class CoreConsoleTransport(Transport):
                     "layer must exist before an entity can be assigned to it."
                 ),
             )
+        # The layer existing in the table is not the same as the new entities
+        # being assigned to it, so check the appended entities specifically.
+        if layer:
+            appended = list(state.get("entity_layers") or [])[before:after]
+            if len(appended) != added:
+                raise WriteVerificationError(
+                    tool="add_entities",
+                    check="entity_layers_readable",
+                    expected=added,
+                    actual=len(appended),
+                    host_version=self.host_version(),
+                    host_matrix=host_verdict(self.host_version()),
+                    params={"path": str(source), "layer": layer, "requested": added},
+                    remediation=(
+                        "The per-entity layer readback returned %d entries for %d appended "
+                        "entities; the drawing changed underneath the verification pass."
+                        % (len(appended), added)
+                    ),
+                )
+            wrong = [name for name in appended if name.lower() != str(layer).strip().lower()]
+            if wrong:
+                raise WriteVerificationError(
+                    tool="add_entities",
+                    check="entity_layer_persisted",
+                    expected=[str(layer)] * added,
+                    actual=appended,
+                    host_version=self.host_version(),
+                    host_matrix=host_verdict(self.host_version()),
+                    params={"path": str(source), "layer": layer},
+                    remediation=(
+                        "The entities were saved but not all of them are on the requested "
+                        "layer; in AutoCAD a layer must be current, or the entity assigned "
+                        "to it, before the entity is created."
+                    ),
+                )
 
         payload.pop("engine", None)
         payload.update(
@@ -502,11 +564,14 @@ class CoreConsoleTransport(Transport):
         for name in requested:
             preamble.extend(["_.-LAYER", "_M", str(name), ""])
         preamble.extend(["_.QSAVE"])
+        # Snapshot the table before the mutation so "created" can report which
+        # layers did not already exist, instead of echoing the request.
+        baseline = self._read_back_state(source)
         payload = self._run_with_result(
             preamble,
             (
                 '(write-line "{" dccfp)',
-                '(write-line (strcat "\\"created\\": " (itoa %d)) dccfp)' % len(requested),
+                '(write-line (strcat "\\"requested\\": " (itoa %d)) dccfp)' % len(requested),
                 '(write-line "}" dccfp)',
             ),
         )
@@ -526,11 +591,18 @@ class CoreConsoleTransport(Transport):
                     "save did not reach the file, or a layer name was rejected as invalid."
                 ),
             )
+        # Report what the DWG gained, read back from the file, not the request.
+        existing = {str(name).strip().lower() for name in baseline["layers"]}
+        created = [
+            name
+            for name in requested
+            if str(name).strip().lower() not in existing and _contains_layer(state["layers"], name)
+        ]
         payload.pop("engine", None)
         payload.update(
             {
                 "path": str(source),
-                "created": requested,
+                "created": created,
                 "layers": state["layers"],
                 "verified": True,
             }

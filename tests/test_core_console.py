@@ -224,8 +224,12 @@ class _FakeConsole:
     would be untestable.
     """
 
-    def __init__(self, *payloads):
+    def __init__(self, *payloads, baseline=None):
         self.payloads = list(payloads)
+        # `manage_layers` reads the DWG twice: once before the mutation to see
+        # which layers already existed, and once after. The baseline read is
+        # served from `baseline` so the numbered payloads keep their meaning.
+        self.baseline = baseline
         self.scripts = []
 
     def __call__(self, args, **kwargs):
@@ -233,8 +237,12 @@ class _FakeConsole:
 
         script = (kwargs.get("input") or b"").decode("utf-8")
         self.scripts.append(script)
-        index = len(self.scripts) - 1
-        payload = self.payloads[index] if index < len(self.payloads) else {}
+        is_baseline = self.baseline is not None and len(self.scripts) == 1
+        if is_baseline:
+            payload = self.baseline
+        else:
+            index = len(self.scripts) - (2 if self.baseline is not None else 1)
+            payload = self.payloads[index] if 0 <= index < len(self.payloads) else {}
 
         target = re.search(r'\(setq dccfp \(open "(.+?)" "w"\)\)', script)
         if target:
@@ -356,8 +364,9 @@ def test_manage_layers_verifies_the_layers_survived(transport, monkeypatch, tmp_
         subprocess,
         "run",
         _FakeConsole(
-            {"created": 1},
+            {"requested": 1},
             {"entity_count": 0, "entity_type_csv": "", "layer_csv": "0,WALLS,"},
+            baseline={"entity_count": 0, "entity_type_csv": "", "layer_csv": "0,"},
         ),
     )
 
@@ -365,6 +374,8 @@ def test_manage_layers_verifies_the_layers_survived(transport, monkeypatch, tmp_
 
     assert result["verified"] is True
     assert result["layers"] == ["0", "WALLS"]
+    # WALLS did not exist in the baseline, so it was genuinely created.
+    assert result["created"] == ["WALLS"]
 
 
 def test_manage_layers_fails_when_a_layer_is_absent_after_reload(transport, monkeypatch, tmp_path):
@@ -376,7 +387,11 @@ def test_manage_layers_fails_when_a_layer_is_absent_after_reload(transport, monk
     monkeypatch.setattr(
         subprocess,
         "run",
-        _FakeConsole({"created": 1}, {"entity_count": 0, "entity_type_csv": "", "layer_csv": "0,"}),
+        _FakeConsole(
+            {"requested": 1},
+            {"entity_count": 0, "entity_type_csv": "", "layer_csv": "0,"},
+            baseline={"entity_count": 0, "entity_type_csv": "", "layer_csv": "0,"},
+        ),
     )
 
     with pytest.raises(WriteVerificationError) as excinfo:
@@ -438,3 +453,140 @@ def test_read_back_reopens_from_disk(transport, monkeypatch, tmp_path):
     assert "_.QSAVE" in console.scripts[0]
     assert "_.QSAVE" not in console.scripts[1], "the read-back must not write again"
     assert "_.OPEN" in console.scripts[1]
+
+
+def test_add_entities_verifies_each_new_entity_is_on_the_layer(transport, monkeypatch, tmp_path):
+    """P2-1: the layer table existing is not the same as entities being on it.
+
+    The previous check only asked whether the LAYER table contained the
+    requested name, so entities landing on layer "0" still reported success.
+    """
+    dwg = tmp_path / "a.dwg"
+    dwg.write_bytes(b"AC1032")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _FakeConsole(
+            {"entities_before": 0, "entities_after": 1, "entities_requested": 1},
+            # The layer exists in the table, but the new entity is on "0".
+            {
+                "entity_count": 1,
+                "entity_type_csv": "LINE,",
+                "entity_layer_csv": "0,",
+                "layer_csv": "0,WALLS,",
+            },
+        ),
+    )
+
+    from dcc_mcp_autocad.write_contract import WriteVerificationError
+
+    with pytest.raises(WriteVerificationError) as excinfo:
+        transport.add_entities(
+            str(dwg), [{"type": "line", "start": [0, 0], "end": [1, 1]}], layer="WALLS"
+        )
+
+    assert excinfo.value.check == "entity_layer_persisted"
+
+
+def test_add_entities_accepts_entities_actually_on_the_layer(transport, monkeypatch, tmp_path):
+    """The symmetric positive case: entities on the layer must not be rejected."""
+    dwg = tmp_path / "a.dwg"
+    dwg.write_bytes(b"AC1032")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _FakeConsole(
+            {"entities_before": 0, "entities_after": 1, "entities_requested": 1},
+            {
+                "entity_count": 1,
+                "entity_type_csv": "LINE,",
+                "entity_layer_csv": "WALLS,",
+                "layer_csv": "0,WALLS,",
+            },
+        ),
+    )
+
+    result = transport.add_entities(
+        str(dwg), [{"type": "line", "start": [0, 0], "end": [1, 1]}], layer="WALLS"
+    )
+
+    assert result["verified"] is True
+
+
+def test_host_version_is_probed_once_after_a_failure(transport, monkeypatch, tmp_path):
+    """P2-2: a failed probe must be cached, or every error pays for it twice."""
+    calls = {"n": 0}
+
+    def boom(*args, **kwargs):
+        calls["n"] += 1
+        raise OSError("host is wedged")
+
+    monkeypatch.setattr(transport, "_probe_version", boom)
+
+    assert transport.host_version() is None
+    assert transport.host_version() is None
+    assert transport.host_version() is None
+
+    assert calls["n"] == 1, "an unreachable host must be probed once, not per caller"
+
+
+def test_manage_layers_created_excludes_pre_existing_layers(transport, monkeypatch, tmp_path):
+    """P3-2: `created` must be the delta, not the request echoed back.
+
+    WALLS already exists before the call, so creating it is a no-op and must
+    not be reported as created. An implementation that simply assigns
+    `created = requested` reports ["WALLS"] here and is wrong.
+    """
+    dwg = tmp_path / "a.dwg"
+    dwg.write_bytes(b"AC1032")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _FakeConsole(
+            {"requested": 2},
+            {"entity_count": 0, "entity_type_csv": "", "layer_csv": "0,WALLS,DOORS,"},
+            baseline={"entity_count": 0, "entity_type_csv": "", "layer_csv": "0,WALLS,"},
+        ),
+    )
+
+    result = transport.manage_layers(str(dwg), ["WALLS", "DOORS"])
+
+    assert result["created"] == ["DOORS"], "only layers the DWG gained count as created"
+    assert result["layers"] == ["0", "WALLS", "DOORS"]
+
+
+def test_decode_order_is_pinned_by_a_bomless_ascii_utf16_stream():
+    """P3-3: pin the sniff order against its mirror blind spot.
+
+    `b"plains"` only proves the no-NUL branch. This case is what the sniffing
+    exists for: UTF-16-LE with **no BOM** whose content is pure ASCII, so NULs
+    are interleaved. It is *also* valid UTF-8 (NUL is legal there), so "try
+    utf-8 first" would silently win and return NUL-riddled garbage instead of
+    raising. Only the NUL sniff routes it correctly.
+    """
+    from dcc_mcp_autocad.transports.core_console import _decode_console_bytes
+
+    raw = "Command:".encode("utf-16-le")
+    assert b"\x00" in raw
+    # The buffer is genuinely ambiguous: both codecs "succeed".
+    assert raw.decode("utf-8") != "Command:"
+    assert raw.decode("utf-16-le") == "Command:"
+    assert _decode_console_bytes(raw) == "Command:"
+
+
+def test_nul_free_ascii_is_never_decoded_as_utf16():
+    """The complementary guard: no NUL means UTF-16 must not be tried first.
+
+    Plain ASCII is even-length compatible with UTF-16, which turns it into
+    mojibake rather than raising. This assertion is what fails if the codecs
+    are ever reordered to try UTF-16 first.
+    """
+    from dcc_mcp_autocad.transports.core_console import _decode_console_bytes
+
+    raw = b"Command:"
+    assert b"\x00" not in raw
+    # Document the trap: UTF-16 "succeeds" here and yields mojibake.
+    mojibake = raw.decode("utf-16")
+    assert mojibake != "Command:"
+    assert len(mojibake) == 4, "UTF-16 packs two ASCII bytes per code unit"
+    assert _decode_console_bytes(raw) == "Command:"

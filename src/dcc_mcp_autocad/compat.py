@@ -242,9 +242,16 @@ def unsupported_reason(verdict: Dict[str, Any]) -> str:
     version = verdict.get("version") or "unknown"
     status = verdict.get("status")
     if status == UNKNOWN:
+        # Deliberately does not advertise %s: an unparsable ACADVER cannot be
+        # overridden (see install.py), so offering the switch would send an
+        # operator after a remedy that provably does nothing.
         return (
-            "AutoCAD reported an unrecognised ACADVER %r; verified range: %s. "
-            "Set %s=1 to run anyway at your own risk." % (version, covered, ALLOW_UNVERIFIED_ENV)
+            "AutoCAD reported an unrecognised ACADVER %r; verified range: %s. This "
+            "status cannot be overridden with %s — the version string itself must "
+            "be readable before any host decision can be made. Check that the "
+            "resolved executable is AutoCAD (not a vertical or OEM variant "
+            "returning an unexpected ACADVER), then retry."
+            % (version, covered, ALLOW_UNVERIFIED_ENV)
         )
     if status == TOO_NEW:
         return (
