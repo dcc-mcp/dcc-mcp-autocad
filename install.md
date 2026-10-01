@@ -75,9 +75,15 @@ dcc-mcp-autocad-doctor doctor --json
 Only AutoCAD 2026 (ACADVER `25.1`) is verified. Every other declared year is
 refused by default. To run on one of them anyway:
 
+```cmd
+set DCC_MCP_AUTOCAD_ALLOW_UNVERIFIED_HOST=1
+```
+
+```powershell
+$env:DCC_MCP_AUTOCAD_ALLOW_UNVERIFIED_HOST=1
+```
+
 ```bash
-set DCC_MCP_AUTOCAD_ALLOW_UNVERIFIED_HOST=1   # Windows cmd
-$env:DCC_MCP_AUTOCAD_ALLOW_UNVERIFIED_HOST=1  # PowerShell
 export DCC_MCP_AUTOCAD_ALLOW_UNVERIFIED_HOST=1
 ```
 
@@ -92,7 +98,7 @@ the configured workspace. The default workspace is the system temp directory,
 so **reading or editing drawings you already have — for example
 `%USERPROFILE%\Documents\plan.dwg` — is rejected until you extend the roots**:
 
-```bash
+```cmd
 set DCC_MCP_AUTOCAD_WORKSPACE=C:\drawing-work
 set DCC_MCP_AUTOCAD_ALLOWED_ROOTS=C:\Users\you\Documents
 ```

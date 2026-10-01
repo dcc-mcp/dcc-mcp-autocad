@@ -555,6 +555,41 @@ def test_manage_layers_created_excludes_pre_existing_layers(transport, monkeypat
     assert result["layers"] == ["0", "WALLS", "DOORS"]
 
 
+@pytest.mark.parametrize(
+    "requested,expected",
+    [
+        (["WALLS", "walls"], ["WALLS"]),
+        (["WALLS", "WALLS"], ["WALLS"]),
+        (["WALLS", "walls", "DOORS", "doors"], ["WALLS", "DOORS"]),
+    ],
+)
+def test_manage_layers_created_reports_each_gained_layer_once(
+    transport, monkeypatch, tmp_path, requested, expected
+):
+    """F2: `created` is the set of gained layers, not the request filtered.
+
+    AutoCAD layer names are case-insensitive, so ["WALLS", "walls"] gains one
+    layer and must be reported once; so must an exact repeat. Filtering the
+    request against the baseline without de-duplicating it reports both
+    spellings and is wrong.
+    """
+    dwg = tmp_path / "a.dwg"
+    dwg.write_bytes(b"AC1032")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _FakeConsole(
+            {"requested": len(requested)},
+            {"entity_count": 0, "entity_type_csv": "", "layer_csv": "0,WALLS,DOORS,"},
+            baseline={"entity_count": 0, "entity_type_csv": "", "layer_csv": "0,"},
+        ),
+    )
+
+    result = transport.manage_layers(str(dwg), requested)
+
+    assert result["created"] == expected, "one entry per layer the DWG gained"
+
+
 def test_decode_order_is_pinned_by_a_bomless_ascii_utf16_stream():
     """P3-3: pin the sniff order against its mirror blind spot.
 

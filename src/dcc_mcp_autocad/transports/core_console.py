@@ -593,11 +593,19 @@ class CoreConsoleTransport(Transport):
             )
         # Report what the DWG gained, read back from the file, not the request.
         existing = {str(name).strip().lower() for name in baseline["layers"]}
-        created = [
-            name
-            for name in requested
-            if str(name).strip().lower() not in existing and _contains_layer(state["layers"], name)
-        ]
+        # Names are de-duplicated case-insensitively: AutoCAD layer names are
+        # case-insensitive, so a request of ["WALLS", "walls"] gains one layer
+        # and must be reported once.
+        created: List[str] = []
+        reported: set = set()
+        for name in requested:
+            key = str(name).strip().lower()
+            if key in existing or key in reported:
+                continue
+            if not _contains_layer(state["layers"], name):
+                continue
+            reported.add(key)
+            created.append(name)
         payload.pop("engine", None)
         payload.update(
             {
