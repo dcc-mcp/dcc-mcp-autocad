@@ -34,28 +34,39 @@ NON_TOOL_METHODS = {
 }
 
 
-def _transport_classes():
-    """Every transport class, base and subclasses, with their modules imported.
+def _transport_modules():
+    """Import every module in the transports package and return them.
 
-    ``__subclasses__()`` only sees classes whose module has already been
-    imported, so the transport modules are imported here first; otherwise a
-    method added to a transport whose module the suite never loaded escapes
-    this guard entirely.
+    The list is read from the package rather than written out here. A
+    hand-maintained import list rots silently: ``__subclasses__()`` only sees
+    classes whose module has been *imported*, so dropping one entry still
+    passes whenever some other test happens to import that module first --
+    which is exactly the gap this guard exists to close.
     """
-    from dcc_mcp_autocad.transports import (  # noqa: F401
-        Transport,  # noqa: F401
-        com_transport,
-        core_console,
-    )
+    import importlib
+    import pkgutil
 
-    ordered = []
-    stack = [Transport]
-    while stack:
-        cls = stack.pop()
-        if cls in ordered:
-            continue
-        ordered.append(cls)
-        stack.extend(cls.__subclasses__())
+    import dcc_mcp_autocad.transports as transports
+
+    return [
+        importlib.import_module("dcc_mcp_autocad.transports." + info.name)
+        for info in pkgutil.iter_modules(transports.__path__)
+    ]
+
+
+def _transport_classes():
+    """Every Transport subclass defined in the package, base included.
+
+    Classes are collected per module rather than via ``__subclasses__()`` so
+    the result is the same whether or not the package re-exports them.
+    """
+    from dcc_mcp_autocad.transports import Transport
+
+    ordered = [Transport]
+    for module in _transport_modules():
+        for value in vars(module).values():
+            if isinstance(value, type) and issubclass(value, Transport) and value not in ordered:
+                ordered.append(value)
     return ordered
 
 
@@ -159,14 +170,25 @@ def test_every_transport_method_is_classified():
 
 
 def test_the_classifier_guard_sees_subclass_methods():
-    """Non-vacuity: the guard must actually cover more than the base class.
+    """Non-vacuity: the guard must cover every transport the package defines.
 
-    If the transport modules stop importing, ``__subclasses__()`` comes back
-    empty and the classification test would pass while guarding nothing.
+    Two directions have to hold. The walk must reach the known subclasses, or
+    the classification test guards only the base class while looking complete;
+    and every module the package ships must actually be walked, so a module
+    dropped from the scan is caught here instead of rotting unnoticed.
     """
     names = {cls.__name__ for cls in _transport_classes()}
 
     assert {"Transport", "ComTransport", "CoreConsoleTransport"} <= names, names
+
+    scanned = {module.__name__.rsplit(".", 1)[-1] for module in _transport_modules()}
+    walked = {cls.__module__.rsplit(".", 1)[-1] for cls in _transport_classes()}
+    assert {"base", "com_transport", "core_console"} <= scanned, scanned
+    # Every module defining a transport must be represented in the walk.
+    assert scanned & walked == {"base", "com_transport", "core_console"}, (
+        scanned,
+        walked,
+    )
 
 
 def test_mutation_classification_covers_the_documented_tools():

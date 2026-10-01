@@ -45,10 +45,10 @@ dcc-mcp-autocad-doctor verify --json --transport accoreconsole
 ```
 
 **Working with drawings you already have:** the adapter is deny-by-default — a
-path is accepted only when it resolves inside the configured workspace (by
-default the system temp directory) **or** inside one of the roots listed in
-`DCC_MCP_AUTOCAD_ALLOWED_ROOTS`, which may lie outside the workspace. Point it
-at your DWG archive before editing existing drawings — see
+path is accepted only when it normalizes to a path inside the configured
+workspace (by default the system temp directory) **or** inside one of the
+roots listed in `DCC_MCP_AUTOCAD_ALLOWED_ROOTS`, which may lie outside the
+workspace. Point it at your DWG archive before editing existing drawings — see
 [Drawing workspace](install.md#drawing-workspace-deny-by-default):
 
 ```cmd
