@@ -1,0 +1,27 @@
+name: QA PAT probe
+
+# Throwaway probe: confirm the org-level PERSONAL_ACCESS_TOKEN resolves in this
+# repository and belongs to an account with push rights here. The release
+# approval gate is applied per run actor, so a token whose owner is not a
+# collaborator would leave the release PR gated.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report the PAT identity and repository rights
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::org secret PERSONAL_ACCESS_TOKEN resolves empty here"
+            exit 1
+          fi
+          echo "PAT identity: $(gh api /user --jq '"login=\(.login) type=\(.type) id=\(.id)"')"
+          echo "PAT rights on dcc-mcp-autocad: $(gh api /repos/dcc-mcp/dcc-mcp-autocad --jq '.permissions | to_entries | map(select(.value)) | map(.key) | join(",")')"
