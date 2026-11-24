@@ -10,8 +10,20 @@ jobs:
       matrix:
         # CI never launches AutoCAD: no runner has it installed or licensed.
         # Coverage is import safety, transport contracts, and capability logic.
-        python-version: ["3.9", "3.12"]
-        os: [ubuntu-24.04, windows-latest]
+        include:
+          - python-version: "3.9"
+            os: ubuntu-24.04
+            label: ubuntu-latest
+          - python-version: "3.9"
+            os: windows-latest
+            label: windows-latest
+          - python-version: "3.12"
+            os: ubuntu-24.04
+            label: ubuntu-latest
+          - python-version: "3.12"
+            os: windows-latest
+            label: windows-latest
+    name: test (${{ matrix.python-version }}, ${{ matrix.label }})
     runs-on: ${{ matrix.os }}
     # Windows runners default to PowerShell, where `set -e` and `$?` do not
     # behave like POSIX. Pin every step to bash for identical semantics.
