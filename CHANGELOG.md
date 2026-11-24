@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/dcc-mcp/dcc-mcp-autocad/compare/v0.1.3...v0.1.4) (2026-11-24)
+
+
+### Documentation
+
+* refresh the generated DCC-MCP host matrix pointer ([591edd7](https://github.com/dcc-mcp/dcc-mcp-autocad/commit/591edd7c06eb5c83aa3c54bf66d1da3ed6567c56))
+
 ## [0.1.3](https://github.com/dcc-mcp/dcc-mcp-autocad/compare/v0.1.2...v0.1.3) (2026-10-13)
 
 
